@@ -1,0 +1,93 @@
+---
+title: "Purple Air Functions and Validity Tests"
+output: html_document
+---
+
+# Adam Lang
+
+```{r Eval=TRUE}
+library(purrr)
+library(lubridate)
+```
+## Purple Air Functions
+
+All of this stuff is still a work in progress and has yet to be cleaned up, but I will run you through the jist of what I have so far. Im looking forward to this long weekend to make more progress and tidy up this code.
+
+
+This code which I will turn into a function will take the Purple Air Json URL and subset to only the sensors in SLO and just the variables we care about
+```{r Eval=TRUE}
+url <- "https://www.purpleair.org/json"
+raw <- RCurl::getURL(url)    
+d <- jsonlite::fromJSON(raw)
+data <- d$results 
+slo <- data[data$Lon > -120.88 & data$Lon < -120.30 
+            & data$Lat > 34.97 & data$Lat < 35.79 
+            & is.na(data$Lat) == FALSE, ]
+keepers=c("ID","Label","THINGSPEAK_PRIMARY_ID","THINGSPEAK_PRIMARY_ID_READ_KEY",
+          "THINGSPEAK_SECONDARY_ID","THINGSPEAK_SECONDARY_ID_READ_KEY","Lat","Lon","PM2_5Value","LastSeen")
+newdata <- slo[keepers]
+
+```
+
+**createurl** <br>
+This function can then take in a Thingspeak ID and Key from the previous dataframe and create a URL that can retreive the JSON data
+```{r Eval=TRUE}
+createurl <- function(id, key){
+  url <- paste0("https://api.thingspeak.com/channels/", id,  
+                "/feeds.json?api_key=", key,
+                "&average=60&days=1")
+}
+```
+
+**mapthrough** <br>
+Using "createurl" I wrote a function called mapthrough which takes all IDs and Keys that we are interested in and creates all URLs we need
+```{r Eval=TRUE}
+mapthrough <- function(df){
+  arg1 <-df["THINGSPEAK_PRIMARY_ID"]
+  arg2 <-df["THINGSPEAK_PRIMARY_ID_READ_KEY"]
+  urlist <-map2_dfr(arg1, arg2, createurl)
+  return(urlist)
+}
+```
+
+Heres what it looks like
+```{r Eval=TRUE}
+mapthrough(newdata)
+```
+
+
+I took one URL just to play around with how I wanted to format the data after retreiving it. Im going to take this idea and write a function that applies it to all URLS. Basically I want to extract the PM2.5 values and format it in a dataframe in a way that my previously defined PM2.5 functions can take it in and assign a NowCast AQI. All this code is doing is making the time variable of a Date/Time class, changing the timezone, and reordering the rows so that the most recent hour is the first row.
+```{r Eval=TRUE}
+url1<-"https://api.thingspeak.com/channels/648700/feeds.json?api_key=ML5LCKPZSF9T4X92&average=60&days=1"
+raw1 <- RCurl::getURL(url1)    
+d1 <- jsonlite::fromJSON(raw1)
+d1$feeds$created_at<-as.POSIXct(d1$feeds$created_at, tz = "UTC", "%Y-%m-%dT%H:%M:%SZ")-8*60*60
+d1$feeds$created_at<-force_tz(d1$feeds$created_at, tzone = "Etc/GMT+8")
+cleandata<-data.frame("Date-Time"=d1$feeds$created_at,"PM2.5"=d1$feeds$field2,
+                      "Humidity"=d1$feeds$field7,"Temperature"=d1$feeds$field6)
+cleandata<-cleandata[order(nrow(cleandata):1),]
+
+cleandata
+```
+
+From this it should be pretty quick to write a function that can do this for all pairs of URLs
+(every device has a URL for each of the two sensors) and then run it through the already defined functions for PM2.5 Nowcast AQI. A little adjustment will be necessary in that it needs to take each pair of sensors and if determined to be valid take the average of both. 
+
+
+## Validity checks for the data
+
+Below is a graph of 50 hours of data from two sensors at a Purple Air device located in Los Osos
+```{r Eval=TRUE}
+airgraphs<-read.csv(file = "/Users/adamlang/Desktop/PA_AvB.csv")
+airgraphs24<-head(airgraphs,50)
+plot(airgraphs24$Los.Osos.PA_A,type="l")
+lines(airgraphs24$Los.Osos.PA_B, col="blue")
+```
+
+I feel that the best approach to determining whether the data is valid is looking at the R Square values between the data of each sensor. I think trying to come up with a model based on percent difference after some threshold and other parameters may introduce a lot of potential error. Since we have a years worth of data, I was thinking we could randomly select around 30% of it, calculate the R Square values between each pair of sensors over a fixed time period, and plot a histogram of the R Square values. Under the assumption that these things are working well most of the time, we should get some sort of Gaussian curve and see what the mean R Square value looks like, and what a poor R Square value looks like. We can them make our decision on what determines valid data from there.
+
+
+## Next Steps
+My progress this week has been slower than I would have liked. It took me a little while just to figure out how these things work, what the end goal is, and what problems need to be solved to get there. I feel now that I have a much better understanding of what needs to be done and can get the ball rolling. 
+
+I definitely need to clean a lot of this code up. The readability as of now is pretty poor which im well aware of but I feel like a lot of the greater ideas for what I want to do I have down. 

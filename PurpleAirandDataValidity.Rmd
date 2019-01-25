@@ -1,0 +1,239 @@
+---
+title: "Purple Air and Validity Checks"
+output: html_document
+---
+### Adam Lang
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Purple Air API Functions
+Included in this section of the Markdown file is a series of functions that handle each step in grabbing the Purple Air JSON data and returning the specific information we are interested in a way that is easy to use. They are composed into one function at the end that can run through the whole process.
+```{r}
+library(purrr)
+library(lubridate)
+library(RCurl)
+library(data.table)
+library(stringr)
+```
+<br>
+
+### SloFilter 
+SloFilter takes in "https://www.purpleair.com/json" as its argument and returns a dataframe with the ThingSpeak ID's and corresponding Keys for the sensors in SLO. These ID's and Keys will be used to construct the specific URLs for each sensor
+<br>
+**SloFilter** 
+```{r eval=TRUE}
+SloFilter <- function(url) {
+raw <- RCurl::getURL(url)    
+datadump <- jsonlite::fromJSON(raw)
+dumpresults <- datadump$results 
+slo <- dumpresults[dumpresults$Lon > -120.88 & dumpresults$Lon < -120.30 
+            & dumpresults$Lat > 34.97 & dumpresults$Lat < 35.79 
+            & is.na(dumpresults$Lat) == FALSE, ]
+keepers=c("ID","Label","THINGSPEAK_PRIMARY_ID","THINGSPEAK_PRIMARY_ID_READ_KEY",
+          "THINGSPEAK_SECONDARY_ID","THINGSPEAK_SECONDARY_ID_READ_KEY","Lat","Lon","PM2_5Value","LastSeen")
+newdata <- slo[keepers]
+return(newdata)
+}
+```
+<br>
+
+### CreateURL
+CreateURL can take in a ThingSpeak ID and corresponding Key and construct a URL that can access data from a specific sensor. This function was just defined to create MapThrough which will be covered next.
+<br>
+**CreateURL**
+```{r eval=TRUE}
+CreateURL <- function(id, key){
+  url <- paste0("https://api.thingspeak.com/channels/", id,  
+                "/feeds.json?api_key=", key,
+                "&average=60&days=1")
+}
+```
+<br>
+
+### MapThrough
+Looking at this function now it looks pretty ridiculous. I honestly dont remember why I wrote it this way. I think lapply or map cant handle mapping through functions with two arguments but im not sure. Ill probably rewrite this but for now it works just fine.
+<br>
+**MapThrough**
+```{r eval=TRUE}
+MapThrough <- function(df){
+  arg1 <- df["THINGSPEAK_PRIMARY_ID"]
+  arg2 <- df["THINGSPEAK_PRIMARY_ID_READ_KEY"]
+  urlist <- map2_dfr(arg1, arg2, CreateURL)
+  urlist <- as.data.frame(urlist)
+  urlist <- as.list(urlist$THINGSPEAK_PRIMARY_ID)
+  return(urlist)
+}
+```
+<br>
+
+### ExtractValues
+ExtractValues takes in a single URL with Thingspeak ID and Key and returns dataframe with Date/Time, PM2.5, Humidity, and Temperature for that sensor. The first row is the previous hour before the function ran so that the entire hours average is considered.
+<br>
+**ExtractValues**
+```{r eval=TRUE}
+ExtractValues <- function(url) {
+  rawinfo <- RCurl::getURL(url)
+  parseddata <- jsonlite::fromJSON(rawinfo)
+  if(length(parseddata$feeds)==0){
+    cleandata <-NULL
+  } else {
+  parseddata$feeds$created_at <- as.POSIXct(parseddata$feeds$created_at, tz = "UTC", "%Y-%m-%dT%H:%M:%SZ")-8*60*60
+  parseddata$feeds$created_at <- force_tz(parseddata$feeds$created_at, tzone = "Etc/GMT+8")
+  cleandata<-data.frame("Date-Time"=parseddata$feeds$created_at,"PM2.5"=parseddata$feeds$field2,
+                        "Humidity"=parseddata$feeds$field7,"Temperature"=parseddata$feeds$field6,
+                        "Name"=parseddata$channel$name, "Latitude"=parseddata$channel$latitude,
+                        "Longitude"=parseddata$channel$longitude, stringsAsFactors = FALSE)
+  cleandata<-cleandata[order(nrow(cleandata):2),]
+  }
+  return(cleandata)
+}
+```
+<br>
+
+### MasterFunc
+This is the composition of all the previous functions combined with a sequence of for loops that records all the sensor names, splits the A sensors and the B sensors into seperate lists, and determines what the corresponding A and B sensors are based on regular expression pattern matching. It then returns a list of  2 column dataframes, where each dataframe is a location of a Purple Air device and each column is an A and B sensor. I put some comments within the function to explain whats going on.
+<br>
+**MasterFunc**
+```{r eval=TRUE}
+MasterFunc <- function(url) {
+  #creating a bunch of empty vectors and lists for later use
+  datalist <- c()
+  datanames <- c()
+  vector_a <- c()
+  vector_b <- c()
+  totalveclist <- list()
+  #since each column has 24 rows and you have to append columns
+  #to a dataframe of equal size, i created a length 24 dummy variable
+  dataframe <- data.frame("dummy"=1:24)
+  filtered <- SloFilter(url)
+  urllist <- MapThrough(filtered)
+  #creating a vector of all sensor names and a df of each column by iterating the
+  #extract values function over all the URLS
+  for(i in 1:length(urllist)) {
+    if(all(is.null(ExtractValues(urllist[[i]][1]))==TRUE)){
+      datanames <- append(datanames,"NULL")
+      datalist <- rep(NA,24)
+      dataframe <- cbind(dataframe, datalist) 
+    } else {
+      sensorname <- ExtractValues(urllist[[i]][1])["Name"][1,]
+      datanames <- append(datanames,sensorname)
+      datalist <- ExtractValues(urllist[[i]][1])["PM2.5"]
+      dataframe <- cbind(dataframe, datalist)  
+    }
+    #getting rid of the dummy variable and assigning columns 
+    #the appropriate names
+    dataframe$dummy <- NULL
+    colnames(dataframe) <- datanames
+  }
+  for(i in 1:length(datanames)) {
+    if(datanames[i]=="NULL"){
+      #This looks at all of the sensor names, and if it doesnt end in "_b"
+      #it assigns it to a vector named vector_a
+      # hese are all the A sensors
+    } else if(str_extract_all(datanames[i],"_[b]")=="character(0)") {
+      vector_a<-append(vector_a,datanames[i])
+      #similar idea but for B sensors
+    }  else if(str_extract_all(datanames[i],".(?<!_b)$")=="character(0)") {
+      vector_b<-append(vector_b,datanames[i])
+    } else {
+      
+    }
+  }
+  #this now compares the list of A and B sensors and uses pattern matching to see if they
+  #correspond to the same Purple Air device
+  #if they do then a dataframe is created where one column is the A values and
+  #the other is the B values. 
+  #This then becomes an element of a list which is returned at the end
+  for(i in 1:length(vector_a)) {
+    if(grepl(vector_a[i],vector_b)[i]==TRUE){
+      veclist<-data.frame(dataframe[vector_a[i]], dataframe[grep(vector_a[i],vector_b, value = TRUE)])
+      colnames(veclist)<-c(vector_a[i], grep(vector_a[i],vector_b, value = TRUE))
+      totalveclist[[i]]<-veclist
+    } else {
+      
+    }
+  }
+ return(totalveclist)
+}
+```
+<br>
+Heres what the output looks like for the first few elements in the list
+```{r eval=TRUE}
+x1<-MasterFunc("https://www.purpleair.com/json")
+x1[1:3]
+```
+
+
+# Validating our data
+As the Purple Air devices are cheap and the information they output may not always be reliable, we need some sort of method to validate the data before use. Each device is equipped with an A and B sensor. If the device is functioning perfectly, the A and B sensors should read the same values. This means for each device we can compare its A and B sensors and create some algorithm that determines whether the information from a given device is trustworthy.
+As of now none of the snippets of code below are functions that can take in the output from MasterFunc, but a general idea of how the process is going to work
+<br>
+
+### AirGraphs
+AirGraphs is a csv file with about a years worth of data from 9 Purple Air sensors.
+Here I am taking in the information and creating a dataframe rounded to 9000 observations to make things easier in the future. In this case, every A and corresponding B sensor are next to eachother in the dataframe. I nulled the date column so that later I could break the DF up every two columns and have corresponding A and B sensors isolated (this will make more sense soon)
+<br>
+**AirGraphs**
+```{r}
+AirGraphs <- read.csv(file = "/Users/adamlang/Desktop/APCD Stuff/APCDProgram/Purple Air API/PA_AvB.csv")
+
+AirGraphs <- AirGraphs[1:9000, ]
+
+AirGraphs$date <- NULL
+```
+<br>
+
+### SplittingMap and SplitBy90
+SplittingMap takes AirGraphs and breaks it into a list of dataframes where each dataframe is an A and B sensors values for a location.
+SplitBy90 is similar except that it creates a nested list, where the first elements are all the locations, and within each of those elements is a list of 90 dataframes, where each of those is 100 hours (or roughly 4 days) of values
+<br>
+**SplittingMap and SplitBy90**
+```{r eval=TRUE}
+SplittingMap <- lapply(seq(1,  ncol(AirGraphs),  by=2), function(i) { 
+AirGraphs[i: pmin((i+1), ncol(AirGraphs))]})
+
+SplitBy90 <- map(SplittingMap, split, rep(1:90, each=100))
+```
+![Output from SplittingMap](/Users/adamlang/Desktop/SPLITMAP.png)
+<br>
+Heres what some output looks like from SplitBy90
+```{r Eval=TRUE}
+
+SplitBy90[[1]][1]
+SplitBy90[[1]][2]
+```
+<br>
+Now that things are formatted nicely we can determine how we want to test for validity.
+this loop checks whether the amount of NA values is greater than 50% of the dataframe and if so
+returns "indeterminant" and if not returns the r squared value and slope of the regression line formed by an A and B sensor. The slope is computed by multiplying the t value (coefficent[3] in summary(lm)) and the standard error (coefficent[2] in summary(lm))
+```{r eval=TRUE}
+RSquareValues <- c()
+SlopeValues <- c()
+for (i in 1:9){
+  for (j in 1:90){
+    if((sum(is.na(as.data.frame(SplitBy90[[i]][j])))/200) >= .5) {
+      RSquareValues <- append(RSquareValues, "indeterminant")
+      SlopeValues <-append(SlopeValues, "indeterminant")
+    } else {
+      RSquareValues <- append(RSquareValues, summary(lm(as.data.frame(SplitBy90[[i]][j])[,1] ~ 0+as.data.frame(SplitBy90[[i]][j])[,2]))$r.squared)
+      SlopeValues <- append(SlopeValues,
+                            (summary(lm(as.data.frame(SplitBy90[[i]][j])[,1] ~ 0+as.data.frame(SplitBy90[[i]][j])[,2]))$coefficients[3])*
+                              (summary(lm(as.data.frame(SplitBy90[[i]][j])[,1] ~ 0+as.data.frame(SplitBy90[[i]][j])[,2]))$coefficients[2]))
+    }
+  }
+}
+
+RegressionAndSlope<-data.frame(RSquareValues,SlopeValues)
+```
+Heres what some output looks like:
+```{r Eval=TRUE}
+RegressionAndSlope[1:200,]
+```
+
+# Final Notes
+A few adjustments need be made regarding the functions that retrieve Purple Air data. Occasionally the time on one of the devices doesnt match with the time on my computer and less hours of data than neccesary are retrieved, throwing everything off.
+<br>
+The code for validating data needs to be adjusted as well so that it can take in the output from the MasterFunc function as input and then run its process.
+<br>
+Hitting the URLs consecutively is slowing down MasterFunc. Im going to look into how I can make those requests in parallel so that things can be sped up a bit. 
