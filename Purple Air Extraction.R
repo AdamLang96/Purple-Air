@@ -160,7 +160,7 @@ MasterFunc  <- function(url) {
         # Finding corresponding Lat/Lon values from "filtered" dataframe 
         LatVal <- as.numeric(filter(filtered, THINGSPEAK_PRIMARY_ID == IDVal)["Lat"])
         LonVal <- as.numeric(filter(filtered, THINGSPEAK_PRIMARY_ID == IDVal)["Lon"])
-        sensorname <-values["Name"][1, ]
+        sensorname <- values["Name"][1, ]
         # Building dataframe with Lat/Lon values based on their sensor name
         latframe[sensorname] <- rep(LatVal, 24)
         lonframe[sensorname] <- rep(LonVal, 24)
@@ -200,7 +200,7 @@ MasterFunc  <- function(url) {
                             lapply(dataframe[grep(vector_a[i],vector_b, value = TRUE)], as.numeric), 
                             latframe[vector_a[i]], lonframe[vector_a[i]])
       colnames(veclist) <- c("Date/Time", vector_a[i], 
-                             grep(vector_a[i], vector_b, value = TRUE),"Lat","Lon")
+                             grep(vector_a[i], vector_b, value = TRUE), "Lat", "Lon")
       totalveclist[[i]] <- veclist
       
     } else {
